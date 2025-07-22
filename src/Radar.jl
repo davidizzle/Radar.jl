@@ -4,6 +4,7 @@ module Radar
     using Random
     using Observables
     using LinearAlgebra
+    using DSP
     using ..Parameters
     using ..Constants
     using ..Targets
@@ -51,10 +52,13 @@ module Radar
         elevation::Float64
         azimuthStep::Float64
         angularSpeed::Float64
+        clockwise::Bool
         # For charting output
         echo::Vector{ComplexF64}
         compressedEcho::Vector{ComplexF64}
         dopplerEcho::AbstractMatrix{ComplexF64}
+        detections::Vector{Bool}
+        detectionVals::Vector{ComplexF64}
     end
 
     """ A simple pulse radar system that generates a chirp signal with linear frequency modulation, 
@@ -70,6 +74,7 @@ module Radar
         BW = Parameters.radarChirpBW
         samplingFreq = Parameters.radarSamplingFrequency
         dutyCycle = Parameters.radarDutyCycle / 100.0  # Convert percentage to fraction
+        clockwise = Parameters.clockwise
 
         rangeBins = Int(floor(coverageRange / (Constants.lightSpeed / (2 * samplingFreq))))  # Number of range bins based on coverage range and sampling frequency
         dc = DataCube(rangeBins, Parameters.nPulsesPerBurst, Parameters.nChannels)
@@ -79,11 +84,15 @@ module Radar
         # chirp = 3 .* exp.(im * (2 * π * carrierFreq * chirpWindow .+ π * BW / chirpWindowLength .* chirpWindow .^ 2))
         chirp = 3 * exp.(im * π * BW / chirpWindow[end] * ( chirpWindow .- chirpWindow[end] / 2).^2)
         matchedFilter = conj(reverse(chirp)) ./ norm(chirp, 2)
+
+        # Here is where we might apply SLL
+        matchedFilter .*= DSP.kaiser(length(matchedFilter), Parameters.kaiserSLL)
         matchedFilter = vcat(zeros(ComplexF64, rangeBins - length(matchedFilter)), matchedFilter)
 
         pulseRadar(dc, carrierFreq, BW, samplingFreq, chirp, matchedFilter, dutyCycle, Parameters.radarInitialAzimuth,
-         Parameters.radarInitialElevation, Parameters.radarAzimuthStep, Parameters.radarAngularVelocity,
-         zeros(ComplexF64, rangeBins), zeros(ComplexF64, rangeBins), zeros(ComplexF64, rangeBins, Parameters.nPulsesPerBurst * 3))
+         Parameters.radarInitialElevation, Parameters.radarAzimuthStep, Parameters.radarAngularVelocity, clockwise,
+         zeros(ComplexF64, rangeBins), zeros(ComplexF64, rangeBins), zeros(ComplexF64, rangeBins, Parameters.nPulsesPerBurst * 3),
+         falses(rangeBins), zeros(ComplexF64, rangeBins))
     end
 
 
@@ -106,9 +115,9 @@ module Radar
             if abs(az - target.azimuth) >= 0.5
                 return nothing  # No echo if target is outside the azimuth coverage
             end
-            if abs(az - target.azimuth) < 0.5
-                println("Target! At azimuth: $az") # No echo if target is outside the azimuth coverage
-            end
+            # if abs(az - target.azimuth) < 0.5
+            #     println("Target! At azimuth: $az") # No echo if target is outside the azimuth coverage
+            # end
 
             
             # Calculate the time delay based on the target's radial speed and distance
@@ -121,7 +130,14 @@ module Radar
             dopplerPhase = exp.(im .* 2 .* π .* dopplerShift .* t)
             
             # Calculate attenuation
-            attenuation = 1e12 * SwerlingModels.swerlingAmplitude(target.rcs, target.swerlingModel) / (target.distance^2 + 1e-6)
+            Pt = Parameters.radarPower
+            Pn = Constants.boltzmann * Parameters.radarTemperature * Parameters.radarChirpBW  # Noise power
+            G = 10^(Parameters.radarAntennaGain / 10) # Given in dB
+            λ = Constants.lightSpeed / fc
+
+            attenuation = (Pt * G^2 * λ^2 * target.rcs) / ((4π)^3 * (target.distance^4 + 1e-6) * Pn)
+            # @show attenuation
+            # attenuation = 1e10 * SwerlingModels.swerlingAmplitude(target.rcs, target.swerlingModel) / (target.distance^2 + 1e-6)
             
             echo = chirpedSignal .* attenuation .* dopplerPhase
             paddedEcho = zeros(ComplexF64, rangeBins)
@@ -206,7 +222,7 @@ module Radar
             # @show size(echo), size(paddedFilter) 
             return ifft(fft(echo) .* fft(matchedFilter))
             
-            # # Apply matched filter to the echo signal
+            # # Apply matched filter to the echo signalq
             # res = conv(echo, matchedFilter)
 
             # # Normalize the compressed echo
@@ -218,7 +234,11 @@ module Radar
             # res[halfLength:halfLength + N - 1]
         end
 
-        function dopplerProcessing!(compressedEchoes::AbstractMatrix{ComplexF64})
+        function dopplerProcessing!(compressedEchoes::AbstractMatrix{ComplexF64}; window::Vector{Float64} = nothing)
+            if window !== nothing
+                compressedEchoes .*= window'
+            end
+            
             # FFT along the columns
             fft!(compressedEchoes, 2)  # FFT to process the echo in frequency domain
             compressedEchoes .= conj.(compressedEchoes) ./ sqrt(Parameters.nPulsesPerBurst)  # Renormalize after gain
@@ -240,39 +260,40 @@ module Radar
         # Returns:
         - detections: BitMatrix of size(data), where true = detection
         """
-        function caCFAR(data::AbstractMatrix; guard::Int=1, ref::Int=4, K::Float64=1.4)
+        function caCFAR(data::AbstractMatrix; guard::Int=1, ref::Int=50, K::Float64=2.4)
             rows, cols = size(data)
             detections = falses(rows, cols)
 
             # Work on magnitude
             mag = abs.(data)
 
-            totalWindow = guard + ref
+            averageThreshold = K * mean(mag)
 
-            for r in (1 + totalWindow):(rows - totalWindow)
-                for c in (1 + totalWindow):(cols - totalWindow)
-                    # Define reference window
-                    rStart, rEnd = r - totalWindow, r + totalWindow
-                    cStart, cEnd = c - totalWindow, c + totalWindow
+            detections .= mag .> averageThreshold
+            
+            # totalWindow = guard + ref
+            # for r in (1 + totalWindow):(rows - totalWindow)
+            #     for c in 1:cols
+            #         # Define reference window
+            #         rStart, rEnd = r - totalWindow, r + totalWindow
 
-                    # Exclude guard + CUT window
-                    rGuardStart, rGuardEnd = r - guard, r + guard
-                    cGuardStart, cGuardEnd = c - guard, c + guard
+            #         # Exclude guard + CUT window
+            #         rGuardStart, rGuardEnd = r - guard, r + guard
 
-                    # Get reference cells
-                    window = mag[rStart:rEnd, cStart:cEnd]
-                    window[rGuardStart - rStart + 1 : rGuardEnd - rStart + 1,
-                        cGuardStart - cStart + 1 : cGuardEnd - cStart + 1] .= NaN
+            #         # Get reference cells
+            #         window = mag[rStart:rEnd, c]
+            #         window[rGuardStart - rStart + 1 : rGuardEnd - rStart + 1] .= NaN
 
-                    # Compute threshold
-                    noise = mean(skipmissing(window))
-                    threshold = K * noise
+            #         # Compute threshold
+            #         noise = mean(skipmissing(window))
+            #         threshold = K * noise
+                    
 
-                    if mag[r, c] > threshold
-                        detections[r, c] = true
-                    end
-                end
-            end
+            #         if mag[r, c] > threshold
+            #             detections[r, c] = true
+            #         end
+            #     end
+            # end
 
             return detections
         end
@@ -291,7 +312,7 @@ module Radar
                 
                 # Azimuth spanned update
                 deltaAz = timeElapsed * r.angularSpeed
-                deltaAz = Parameters.clockwise ? deltaAz : -deltaAz
+                deltaAz = r.clockwise ? deltaAz : -deltaAz
                 r.azimuth = mod(r.azimuth + deltaAz, 360)
                 
                 # Simulate listening for echoes  
@@ -320,13 +341,13 @@ module Radar
 
             # SLOW-TIME: Apply Doppler processing
             r.dopplerEcho .= hcat(r.datacube.data[:, :, 1], zeros(r.datacube.rangeBins, r.datacube.nPulses * 2))  # Matrix of Doppler data
-            dopplerProcessing!(r.dopplerEcho)
-            r.datacube[:, :, 1] .= dopplerProcessing!(r.datacube[:, :, 1])
+            dopplerProcessing!(r.dopplerEcho; window=DSP.kaiser(size(r.dopplerEcho, 2), Parameters.kaiserSLL))
+            r.datacube[:, :, 1] .= dopplerProcessing!(r.datacube[:, :, 1]; window=DSP.kaiser(r.datacube.nPulses, Parameters.kaiserSLL))
             # if maximum(abs.(r.datacube[:, :, 1])) > 30
             #     println("Max Doppler data: $(maximum(abs.(r.datacube[:, :, 1])))")
             # end
-  
-            detections = caCFAR(r.datacube[:, :, 1])
+            r.detectionVals .= vec(maximum(abs.(r.datacube[:, :, 1]), dims=2))
+            r.detections .= vec(any(caCFAR(r.datacube[:, :, 1]), dims=2))
 
             # TODO: Implement monopulse with added channels
 
@@ -363,26 +384,16 @@ module Radar
        
     function runRadar(
         radar::Radar.pulseRadar,
-        targets::Vector{Targets.Target};
-        fps=60.0)
+        targets::Vector{Targets.Target}
+    )
         @async begin
             try
-                dt = 1 / fps
                 lastUpdateTime = time()
                 while true
 
-                    # beamPoints[] = [beamPoints[][1], newEnd]
-                    # beamPoints[][2] = newEnd
                     # Update detection routine
                     lastUpdateTime = RadarProcessingChain.processingRoutine(radar, targets, lastUpdateTime)
-                    # @async begin
-                    #     try
-                    #         RadarProcessingChain.processingRoutine(radar, targets)
-                    #     catch e
-                    #         @error "Radar processing failed!" exception=(e, catch_backtrace())
-                    #     end
-                    # end
-                    # sleep(dt)
+
                     # This is too frequent, we ideally want to only reliqnquish control when we are not updating the UI
                     # yield() 
                     # Workaround: sleep a fine-tuned amount

@@ -21,10 +21,11 @@ module Targets
     function PolarTarget(distance::Float64, azimuth::Float64, radialSpeed::Float64, tangentialSpeed::Float64; swerlingModel::Symbol = :Swerling0, rcs::Float64 = 1.0, status = :unknown)
         @assert distance >= 0 "Distance must be non-negative"
         # @assert radialSpeed >= 0 "Radial speed must be non-negative"
-        @assert azimuth >= 0 && azimuth < 2π "Azimuth must be in the range [0, 2π)"
+        # @assert azimuth >= 0 && azimuth < 360 "Azimuth must be in the range [0, 360)"
         @assert swerlingModel in [:Swerling0, :Swerling1, :Swerling2, :Swerling3, :Swerling4] "Unsupported Swerling model: $swerlingModel"
         @assert rcs >= 0 "RCS must be non-negative"
         
+        azimuth = mod(azimuth, 360)
         return PolarTarget(distance, azimuth, radialSpeed, tangentialSpeed, swerlingModel, rcs, time(), status)
     end
     
@@ -50,26 +51,32 @@ module Targets
         # Update the target's position based on its radial speed and the current time
         currentTime = time()
         timeElapsed = currentTime - target.lastUpdateTime
-        target.distance -= target.radialSpeed * timeElapsed
         target.lastUpdateTime = currentTime
 
-        target.azimuth *= 2π / 360  # Convert azimuth to radians
-        x = target.distance * cos(target.azimuth)
-        y = target.distance * sin(target.azimuth)
-        vx = target.radialSpeed * cos(target.azimuth) - target.tangentialSpeed * sin(target.azimuth)
-        vy = target.radialSpeed * sin(target.azimuth) + target.tangentialSpeed * cos(target.azimuth)
+        azimuth_rad = target.azimuth * π / 180  # Convert azimuth to radians
+        x = target.distance * cos(azimuth_rad)
+        y = target.distance * sin(azimuth_rad)
+        vx = target.radialSpeed * cos(azimuth_rad) - target.tangentialSpeed * sin(azimuth_rad)
+        vy = target.radialSpeed * sin(azimuth_rad) + target.tangentialSpeed * cos(azimuth_rad)
 
+        traversedOrigin = false
+        x_old = x
+        y_old = y
         x += vx * timeElapsed
         y += vy * timeElapsed
+        
+        traversedOrigin = (x * x_old <= 0) && (y * y_old <= 0) 
 
         target.distance = sqrt(x^2 + y^2)
-        target.azimuth = atan(y, x) 
-        target.radialSpeed = vx * cos(target.azimuth) + vy * sin(target.azimuth)
-        target.tangentialSpeed = -vx * sin(target.azimuth) + vy * cos(target.azimuth)
-        target.azimuth *= 360 / (2π)  # Convert back to degrees
+        azimuth_rad = atan(y, x) 
+        target.radialSpeed = vx * cos(azimuth_rad) + vy * sin(azimuth_rad)
+        target.tangentialSpeed = -vx * sin(azimuth_rad) + vy * cos(azimuth_rad)
+        target.azimuth = mod(azimuth_rad * 180 / π, 360)  # Convert back to degrees
+
+        @show target.azimuth
 
         # Ensure distance does not go negative
-        if target.distance < 0
+        if traversedOrigin 
             target.radialSpeed = -target.radialSpeed  # Reverse direction if distance goes negative
         end
     end
@@ -84,26 +91,26 @@ module Targets
         target.y += target.yVel * timeElapsed
     end
 
-    function switchTarget!(target::PolarTarget)
+    function switchTarget(target::PolarTarget)
         target.azimuth *= 2π / 360  # Convert azimuth to radians
         x = target.distance * cos(target.azimuth)
         y = target.distance * sin(target.azimuth)
         vx = target.radialSpeed * cos(target.azimuth) - target.tangentialSpeed * sin(target.azimuth)
         vy = target.radialSpeed * sin(target.azimuth) + target.tangentialSpeed * cos(target.azimuth)
-        target = CartesianTarget(x, y, vx, vy, target.swerlingModel, target.rcs, target.lastUpdateTime, target.status)
+        return CartesianTarget(x, y, vx, vy, target.swerlingModel, target.rcs, target.lastUpdateTime, target.status)
     end
 
-    function switchTarget!(target::CartesianTarget)
+    function switchTarget(target::CartesianTarget)
         distance = sqrt(target.x^2 + target.y^2)
         azimuth = atan(target.y, target.x) 
         radialSpeed = target.xVel * cos(azimuth) + target.yVel * sin(azimuth)
         tangentialSpeed = -target.xVel * sin(azimuth) + target.yVel * cos(azimuth)
         azimuth = mod(azimuth * 180 / π, 360)
-        target = PolarTarget(distance, azimuth, radialSpeed, tangentialSpeed, target.swerlingModel, target.rcs, target.lastUpdateTime, target.status)
+        return PolarTarget(distance, azimuth, radialSpeed, tangentialSpeed, target.swerlingModel, target.rcs, target.lastUpdateTime, target.status)
     end
 
     function toPolar(target::CartesianTarget)
-        return switchTarget!(target)
+        return switchTarget(target)
     end
     function toPolar(target::PolarTarget)
         return target
@@ -113,7 +120,7 @@ module Targets
         return target
     end
     function toCartesian(target::PolarTarget)
-        return switchTarget!(target)
+        return switchTarget(target)
     end
 
 end
