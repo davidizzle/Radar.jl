@@ -4,7 +4,7 @@ module Parameters
     const radarPower = 1e6 # Radar power in Watts, 1 MW
     const radarTemperature = 290  # Noise temperature in Kelvin
     const radarAntennaGain = 36 # Antenna gain in dB
-    const radarAngularVelocity = 25  # deg per s
+    const radarAngularVelocity = 30  # deg per s
     const radarAzimuthStep = 0.5  # degrees
     const radarInitialElevation = 0  # degrees
     const radarInitialAzimuth = 0  # degrees

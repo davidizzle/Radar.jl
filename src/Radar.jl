@@ -59,6 +59,10 @@ module Radar
         dopplerEcho::AbstractMatrix{ComplexF64}
         detections::Vector{Bool}
         detectionVals::Vector{ComplexF64}
+        # Preallocated vectors
+        taper::Vector{Float64}
+        phaseVelocities::Vector{Float64}
+        clutter::Vector{ComplexF64}
     end
 
     """ A simple pulse radar system that generates a chirp signal with linear frequency modulation, 
@@ -89,10 +93,12 @@ module Radar
         matchedFilter .*= DSP.kaiser(length(matchedFilter), Parameters.kaiserSLL)
         matchedFilter = vcat(zeros(ComplexF64, rangeBins - length(matchedFilter)), matchedFilter)
 
+        taper = exp.(-range(0, rangeBins-1) ./ (rangeBins * 4))
+
         pulseRadar(dc, carrierFreq, BW, samplingFreq, chirp, matchedFilter, dutyCycle, Parameters.radarInitialAzimuth,
          Parameters.radarInitialElevation, Parameters.radarAzimuthStep, Parameters.radarAngularVelocity, clockwise,
          zeros(ComplexF64, rangeBins), zeros(ComplexF64, rangeBins), zeros(ComplexF64, rangeBins, Parameters.nPulsesPerBurst * 3),
-         falses(rangeBins), zeros(ComplexF64, rangeBins))
+         falses(rangeBins), zeros(ComplexF64, rangeBins), taper, zeros(Float64, rangeBins), zeros(ComplexF64, rangeBins))
     end
 
 
@@ -148,40 +154,16 @@ module Radar
             return circshift(paddedEcho, delayRangeBins)
         end
 
-        function calculateClutterEcho(rangeBins::Int, p::Int; strength=0.5, dopplerSpread=0.01)
-            taper = exp.(-range(0, rangeBins-1) ./ (rangeBins * 4))
+        function calculateClutterEcho(p::Int, taper::Vector{Float64}, clutter::Vector{ComplexF64}, phaseVels::Vector{Float64}; strength=0.5, dopplerSpread=0.01)
+            # taper = exp.(-range(0, rangeBins-1) ./ (rangeBins * 4))
 
-            clutter = strength * randn(ComplexF64, rangeBins) .* taper
-            phaseVel = 2π * dopplerSpread .* rand(rangeBins)
-            clutter .*= exp.(im .* phaseVel .* p)
+            # clutter = strength * randn!(ComplexF64, rangeBins) .* taper
+            clutter .= strength .* randn!(clutter) .* taper
+            phaseVels .= 2π * dopplerSpread .* rand!(phaseVels)
+            clutter .*= exp.(im .* phaseVels .* p)
 
             return clutter
         end
-
-        # const calculateClutterEcho = let
-        #     clutter_buf = nothing
-        #     taper = nothing
-        #     phase_buf = nothing
-        #     prev_N = 0  # track the size used to know when to reallocate
-
-        #     function (rangeBins::Int, p::Int; strength=0.5, dopplerSpread=0.01)
-        #         if clutter_buf === nothing || rangeBins != prev_N
-        #             # (Re)initialize on first use or when size changes
-        #             clutter_buf = Vector{ComplexF64}(undef, rangeBins)
-        #             taper = exp.(-range(0, rangeBins - 1) ./ (rangeBins * 4))
-        #             phase_buf = Vector{Float64}(undef, rangeBins)
-        #             prev_N = rangeBins
-        #         end
-
-        #         randn!(clutter_buf)
-        #         @. clutter_buf = strength * clutter_buf * taper
-        #         rand!(phase_buf)
-        #         @. phase_buf = 2π * dopplerSpread * phase_buf
-        #         @. clutter_buf *= cis(phase_buf * p)
-
-        #         return clutter_buf
-        #     end
-        # end
 
         function calculateTerrainMask(mask::Vector{ComplexF64}, az::Float64, samples::Int, fs::Float64)
 
@@ -368,7 +350,7 @@ module Radar
             end
             
             # Add clutter 
-            out .+= calculateClutterEcho(r.datacube.rangeBins, pulseNum)
+            out .+= calculateClutterEcho(pulseNum, r.taper, r.clutter, r.phaseVelocities)
             # Add terrain mask
             # plt = Plots.plot(abs.(out), title="Echo2", xlabel="Bin", ylabel="|Amplitude|")
             # display(plt)  # Or `gui()` to force window display
@@ -380,7 +362,7 @@ module Radar
             out .+= noisyBackground  # Add noise to the echo
         end
     end
-
+cd 
        
     function runRadar(
         radar::Radar.pulseRadar,

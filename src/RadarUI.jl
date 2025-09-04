@@ -81,6 +81,7 @@ module RadarUI
         # dopp = Observable(abs.(radar.datacube.data[:, :, 1])) 
         shift = round(Int, size(radar.dopplerEcho, 2) / 2)
         dopp = Observable(radar.dopplerEcho) 
+        # abs_dopp = lift(x -> circshift!(x, abs.(x), (0, shift)), dopp)
         abs_dopp = lift(x -> circshift(abs.(x), (0, shift)), dopp)
         # abs_dopp = lift(x -> 10*log10.(abs.(x)), dopp)
         # @show typeof(radar.datacube.data[:, :, 1])   # should be Matrix{ComplexF64}
@@ -205,7 +206,7 @@ module RadarUI
         # Draw concentric circles
         step = maxRange / 5
         for r in step:step:2*maxRange
-            lines!(ax, [polarToCartesian(θ, r) for θ in 0:1:360], color=:gray, linewidth=0.5)
+            lines!(ax, [polarToCartesian(θ, r) for θ in 0:1:    360], color=:gray, linewidth=0.5)
         end
 
         # General background section
@@ -217,7 +218,8 @@ module RadarUI
         # Background
         image_idx = rand(1:7)
         my_image_data = FileIO.load("assets/bkgrnd$(image_idx).png") 
-        image!(ax, -maxRange*1.1..maxRange*1.1, -maxRange*1.1..maxRange*1.1, my_image_data, alpha=0.3)
+        my_image_data = rotr90(my_image_data)
+        image!(ax, -maxRange*1.1..maxRange*1.1, -maxRange*1.1..maxRange*1.1, my_image_data, alpha=0.6)
 
         for i in 1:TRAIL_LENGTH
             alpha = 0.5 - (i - 1) / TRAIL_LENGTH / 2
